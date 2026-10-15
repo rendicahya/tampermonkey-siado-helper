@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SIADO - Auto Presensi Helper
 // @namespace    siado-presensi-helper
-// @version      1.27
+// @version      1.34
 // @description  Semi-otomatisasi alur input Sub Capaian Pembelajaran & Presensi Mahasiswa di SIADO UB: deteksi kelas Tatap Muka yang sedang berlangsung, buka form presensi, lalu isi otomatis "Batas Presensi Mahasiswa" (jam mulai + 30 menit) dan "Keterangan" (Luring). Dosen tinggal mengisi Sub Capaian Pembelajaran lalu klik Simpan.
 // @match        https://siado.ub.ac.id/dosen/akademik/jadwal*
 // @match        https://siado.ub.ac.id//dosen/akademik/jadwal*
@@ -19,14 +19,52 @@
 
   // Kolom pada tabel jadwal (#tabelku) yang ingin disembunyikan.
   // Cocokkan berdasarkan teks header (tanpa spasi, tanpa memandang huruf besar/kecil).
-  const KOLOM_DISEMBUNYIKAN = ['Kode MK', 'Tahun', 'Tim Pengajar', 'Gedung Kuliah', 'SKS Kelas', 'Fakultas', 'Jurusan', 'Seleksi', 'Jadwal', 'Ketua'];
+  // Catatan: kolom yang disembunyikan tetap ada di halaman (hanya tidak tampak), jadi
+  // "Program Studi" tetap dibaca untuk kode prodi di kolom KELAS, dan "Tipe Pertemuan"
+  // tetap dibaca untuk awalan "(P)" & pewarnaan baris.
+  const KOLOM_DISEMBUNYIKAN = ['Kode MK', 'Tahun', 'Tim Pengajar', 'Gedung Kuliah', 'SKS Kelas', 'Fakultas', 'Jurusan', 'Seleksi', 'Jadwal', 'Ketua', 'Program Studi', 'Tipe Pertemuan'];
 
   // Kolom yang ingin dipindah posisinya. Setiap entri: pindahkan "kolom" ke tepat
   // setelah kolom "keSetelah" (dicocokkan berdasarkan teks header, tanpa spasi/besar-kecil).
+  // Catatan: gunakan judul ASLI dari SIADO (mis. 'KLS'), bukan judul hasil rename.
   const KOLOM_DIPINDAH = [
     { kolom: 'Program Studi', keSetelah: 'Nama' },
     { kolom: 'KLS', keSetelah: 'Program Studi' },
   ];
+
+  // Ganti judul kolom: { 'judul asli dari SIADO': 'judul baru' }.
+  // Isi sel kolom "KLS" juga diberi awalan kode program studi, mis. "E" -> "TIF (E)".
+  const KOLOM_RENAME = {
+    'KLS': 'KELAS',
+    'Jumlah Peserta': 'JUMLAH MAHASISWA',
+  };
+
+  // Sembunyikan tombol-tombol yang berada di bawah tabel jadwal (dalam panel yang sama).
+  // Tombol hanya disembunyikan (display:none), tidak dihapus, sehingga fungsi "Ajar Sekarang"
+  // yang memanggilnya di balik layar tetap berjalan. Ubah ke false untuk menampilkannya lagi.
+  const SEMBUNYIKAN_TOMBOL_BAWAH_TABEL = true;
+
+  // Toolbar paling atas (yang ada logo SIADO) tidak lagi menempel (sticky/fixed) saat halaman
+  // digulir, tetapi ikut tergulung ke atas. Ubah ke false untuk mengembalikan perilaku aslinya.
+  const TOOLBAR_TIDAK_STICKY = true;
+
+  // Sembunyikan bar di bawah tabel yang berisi "Showing 1 to xx of xx entries"
+  // (beserta navigasi halaman di bar yang sama, yang tidak terpakai bila "Show entries" = All).
+  const SEMBUNYIKAN_INFO_ENTRIES = true;
+
+  // Sembunyikan bar di atas tabel yang berisi kotak "Search" (beserta "Show xx entries" di
+  // bar yang sama). Pilihan "Show entries" tetap ada di halaman (hanya tidak tampak), jadi
+  // AUTO_SHOW_ALL_ENTRIES tetap bisa mengubahnya ke "All".
+  const SEMBUNYIKAN_BAR_SEARCH = true;
+  // Kode singkatan program studi. Dicocokkan dengan teks pada kolom "Program Studi"
+  // (tanpa memandang huruf besar/kecil; nama yang lebih panjang dicek lebih dulu supaya
+  // "Pendidikan Teknologi Informasi" tidak tertangkap sebagai "Teknologi Informasi").
+  // Kalau prodi tidak ada di daftar ini, sel kelas dibiarkan apa adanya.
+  const KODE_PRODI = {
+    'Teknik Informatika': 'TIF',
+    'Teknologi Informasi': 'TI',
+    'Pendidikan Teknologi Informasi': 'PTI',
+  };
 
   // Penanda kelas Praktikum: awalan yang ditambahkan di depan nama mata kuliah.
   const AWALAN_PRAKTIKUM = '(P) ';
@@ -65,7 +103,7 @@
   // ditumpuk semua ke kolom itu saja sehingga tampilan jadi tidak proporsional/berantakan.
   const TAMPILAN_LEBAR_MAKS_NO = '28px';          // lebar kolom "No"
   const TAMPILAN_LEBAR_MAKS_PILIH = '36px';       // lebar kolom "Pilih" (radio button)
-  const TAMPILAN_LEBAR_MAKS_KLS = '36px';         // lebar kolom "KLS"
+  const TAMPILAN_LEBAR_MAKS_KLS = '54px';         // lebar kolom "KELAS" (dulu "KLS"; diperlebar agar "PTI (E)" muat satu baris)
   const TAMPILAN_LEBAR_MAKS_JUMLAH_PESERTA = '50px'; // lebar kolom "Jumlah Peserta"
   const TAMPILAN_LEBAR_MAKS_TIPE = '85px';        // lebar kolom "Tipe Pertemuan"
   const TAMPILAN_LEBAR_DEFAULT = '70px';          // jaring pengaman untuk kolom lain yang mungkin belum terdaftar di atas
@@ -440,6 +478,36 @@
   const KOLOM_CENTER_KEYS = ['noIdx', 'pilihIdx', 'klsIdx', 'sksIdx', 'ruangIdx', 'hariIdx', 'jamMulaiIdx', 'jamSelesaiIdx', 'tipeIdx'];
   const HIDE_TARGETS = KOLOM_DISEMBUNYIKAN.map(normalizeHeaderText);
 
+  // Daftar [nama prodi (huruf kecil), kode] diurutkan dari nama terpanjang, supaya
+  // "pendidikan teknologi informasi" dicek sebelum "teknologi informasi".
+  const DAFTAR_KODE_PRODI = Object.entries(KODE_PRODI)
+    .map(([nama, kode]) => [nama.toLowerCase().replace(/\s+/g, ' ').trim(), kode])
+    .sort((a, b) => b[0].length - a[0].length);
+
+  function cariKodeProdi(teksProdi) {
+    const t = (teksProdi || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!t) return null;
+    for (const [nama, kode] of DAFTAR_KODE_PRODI) {
+      if (t.includes(nama)) return kode;
+    }
+    return null;
+  }
+
+  // Ubah isi sel kelas menjadi "KODEPRODI (kelas)", mis. "E" -> "TIF (E)".
+  // Idempotent: nilai kelas asli disimpan di data-kelas-asli, jadi aman dipanggil berulang
+  // (MutationObserver, interval) tanpa jadi "TIF (TIF (E))".
+  function setLabelKelas(kelasCell, prodiCell) {
+    if (!kelasCell) return;
+    if (kelasCell.dataset.kelasAsli === undefined) {
+      kelasCell.dataset.kelasAsli = kelasCell.textContent.trim();
+    }
+    const asli = kelasCell.dataset.kelasAsli;
+    if (!asli) return;
+    const kode = prodiCell ? cariKodeProdi(prodiCell.textContent) : null;
+    const label = kode ? `${kode} (${asli})` : asli;
+    if (kelasCell.textContent !== label) kelasCell.textContent = label;
+  }
+
   // Membangun peta grid header (menangani rowspan/colspan) agar tahu index kolom "leaf"
   // mana yang berasal dari header mana, walau ada header berkelompok (mis. "MATA KULIAH").
   function buildHeaderGrid(thead) {
@@ -730,6 +798,15 @@
       klsIdx: findLeafIndexByText(table, 'KLS'),
       jumlahPesertaIdx: findLeafIndexByText(table, 'Jumlah Peserta'),
     };
+    // Ganti judul kolom sesuai KOLOM_RENAME. Dilakukan SETELAH semua index dicatat
+    // (supaya pencarian judul asli di atas & di KOLOM_DIPINDAH tetap cocok).
+    Object.entries(KOLOM_RENAME).forEach(([judulAsli, judulBaru]) => {
+      const idx = findLeafIndexByText(table, judulAsli);
+      if (idx === -1) return;
+      const { grid, numRows } = buildHeaderGrid(table.tHead);
+      const th = grid[numRows - 1][idx];
+      if (th) th.textContent = judulBaru;
+    });
     if (TAMPILAN_KOMPAK) {
       const { grid, numRows } = buildHeaderGrid(table.tHead);
       const leafRow = numRows - 1;
@@ -780,6 +857,75 @@
     }
   }
 
+  // Sembunyikan tombol yang letaknya SETELAH tabel jadwal (urutan dokumen) di dalam panel
+  // pembungkus tabel yang sama. Tombol di dalam modal/dialog, kontrol DataTables (pagination),
+  // dan tombol milik skrip ini tidak ikut disembunyikan.
+  function sembunyikanTombolBawahTabel() {
+    if (!SEMBUNYIKAN_TOMBOL_BAWAH_TABEL) return;
+    const table = document.getElementById('tabelku');
+    if (!table) return;
+    const wrapper = document.getElementById('tabelku_wrapper') || table;
+    const panel = wrapper.closest('.panel, .card, .box, .x_panel, .widget-box') ||
+      (wrapper.parentElement && wrapper.parentElement.parentElement) || document.body;
+    panel.querySelectorAll('button, a.btn, input[type="button"], input[type="submit"]').forEach(btn => {
+      if (btn.style.display === 'none') return;
+      if (wrapper.contains(btn)) return;
+      if (btn.closest('.modal, [role="dialog"]')) return;
+      if (btn.id && btn.id.startsWith('siado-helper')) return;
+      if (!(wrapper.compareDocumentPosition(btn) & Node.DOCUMENT_POSITION_FOLLOWING)) return;
+      btn.style.display = 'none';
+      btn.dataset.siadoDisembunyikan = '1';
+    });
+  }
+
+  // Cari toolbar atas yang "menempel" (position fixed/sticky, berada di paling atas, selebar
+  // minimal separuh layar) lalu lepaskan. Toolbar fixed diubah ke absolute supaya tetap
+  // menempati posisi yang sama di puncak halaman (jarak/padding konten tidak berubah) tetapi
+  // ikut tergulung; toolbar sticky diubah ke static. Hanya dicari saat halaman masih di
+  // posisi paling atas, supaya tidak salah tangkap elemen lain.
+  function lepasToolbarSticky() {
+    if (!TOOLBAR_TIDAK_STICKY) return;
+    if (window.scrollY > 5) return;
+    const kandidat = document.querySelectorAll(
+      'header, nav, .navbar, .navbar-fixed-top, .header, .main-header, .app-header, .topbar, #header, body > div'
+    );
+    kandidat.forEach(el => {
+      if (el.dataset.siadoToolbarDilepas === '1') return;
+      if (el.id && el.id.startsWith('siado-helper')) return;
+      const cs = getComputedStyle(el);
+      if (cs.position !== 'fixed' && cs.position !== 'sticky') return;
+      const r = el.getBoundingClientRect();
+      if (r.top > 5 || r.height === 0 || r.height > 200) return;
+      if (r.width < window.innerWidth * 0.5) return;
+      el.style.setProperty('position', cs.position === 'fixed' ? 'absolute' : 'static', 'important');
+      el.dataset.siadoToolbarDilepas = '1';
+    });
+  }
+  lepasToolbarSticky();
+
+  // Sembunyikan seluruh bar info DataTables (#tabelku_info), bukan cuma teksnya.
+  // Dari elemen teks itu, naik terus ke elemen pembungkusnya selama pembungkus tersebut
+  // TIDAK memuat tabel jadwal. Pembungkus tertinggi yang didapat itulah "bar"-nya
+  // (apa pun struktur HTML-nya: .row, .bottom, .dt-layout-row, dsb.), lalu disembunyikan.
+  function sembunyikanInfoEntries() {
+    if (SEMBUNYIKAN_INFO_ENTRIES) sembunyikanBarDataTables('tabelku_info');
+    if (SEMBUNYIKAN_BAR_SEARCH) sembunyikanBarDataTables('tabelku_filter');
+  }
+  function sembunyikanBarDataTables(elementId) {
+    const info = document.getElementById(elementId);
+    const table = document.getElementById('tabelku');
+    if (!info || !table) return;
+    let bar = info;
+    while (
+      bar.parentElement &&
+      bar.parentElement !== document.body &&
+      !bar.parentElement.contains(table)
+    ) {
+      bar = bar.parentElement;
+    }
+    if (bar.style.display !== 'none') bar.style.setProperty('display', 'none', 'important');
+  }
+
   // Pasang / copot awalan "(P) " pada sel nama mata kuliah. Idempotent: awalan dibungkus
   // <span class="siado-p-prefix"> sehingga tidak pernah dobel walau fungsi ini dipanggil
   // berulang kali (MutationObserver, interval, dsb.).
@@ -801,13 +947,16 @@
   // klik "Tampilkan", ganti "Show X entries", cari, sort, atau pindah halaman.
   function reapplyTableStyling() {
     const table = document.getElementById('tabelku');
+    lepasToolbarSticky();
     if (!table || !table.tBodies[0]) return;
     ensureTableStyle();
     if (TAMPILAN_KOMPAK) {
       fixKontenOverflow();
     }
     const info = setupTableOnceAndGetInfo(table);
-    const { hariIdx, jamMulaiIdx, jamSelesaiIdx, tipeIdx, namaIdx, prodiIdx, ruangIdx, kehadiranIdx, sksIdx, hiddenCols: hiddenColsArr } = info;
+    sembunyikanTombolBawahTabel();
+    sembunyikanInfoEntries();
+    const { hariIdx, jamMulaiIdx, jamSelesaiIdx, tipeIdx, namaIdx, prodiIdx, ruangIdx, kehadiranIdx, sksIdx, klsIdx, hiddenCols: hiddenColsArr } = info;
     const hiddenCols = new Set(hiddenColsArr);
     const moves = JSON.parse(table.dataset.colMoves || '[]');
     const now = jakartaNow();
@@ -840,6 +989,12 @@
         const idx = info[k];
         if (idx !== -1 && row.cells[idx]) row.cells[idx].classList.add('siado-center');
       });
+      // Isi sel KELAS dengan "KODEPRODI (kelas)", mis. "TIF (E)".
+      // Hanya untuk baris data lengkap (bukan baris placeholder "No data").
+      if (klsIdx !== -1 && row.cells.length > klsIdx) {
+        const prodiCell = (prodiIdx !== -1) ? row.cells[prodiIdx] : null;
+        setLabelKelas(row.cells[klsIdx], prodiCell);
+      }
       // warnai berdasarkan Tipe Pertemuan, beri awalan "(P)" pada nama praktikum, tandai baris
       // hari ini, dan tandai (bold + highlight kuning) baris yang sedang berlangsung tepat saat ini.
       const cells = row.cells;
