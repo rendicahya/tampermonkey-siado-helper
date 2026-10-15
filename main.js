@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SIADO - Auto Presensi Helper
 // @namespace    siado-presensi-helper
-// @version      1.43
+// @version      1.47
 // @description  Semi-otomatisasi alur input Sub Capaian Pembelajaran & Presensi Mahasiswa di SIADO UB: deteksi kelas Tatap Muka yang sedang berlangsung, buka form presensi, lalu isi otomatis "Batas Presensi Mahasiswa" (jam mulai + 30 menit) dan "Keterangan" (Luring). Dosen tinggal mengisi Sub Capaian Pembelajaran lalu klik Simpan. Di halaman OBE (/dosen-obe/akademik/jadwal) hanya merapikan tampilan tabel jadwal.
 // @match        https://siado.ub.ac.id/dosen/akademik/jadwal*
 // @match        https://siado.ub.ac.id//dosen/akademik/jadwal*
@@ -70,6 +70,15 @@
     'Pendidikan Teknologi Informasi': 'PTI',
   };
 
+  // Daftar [nama prodi (huruf kecil), kode] diurutkan dari nama terpanjang, supaya
+  // "pendidikan teknologi informasi" dicek sebelum "teknologi informasi".
+  // (Sengaja dideklarasikan di sini -- BUKAN di bawah bersama cariKodeProdi() -- karena
+  // blok halaman OBE di bawah sudah memakainya lalu mengakhiri skrip dengan `return`,
+  // sementara `const` tidak ter-hoisting seperti `function`.)
+  const DAFTAR_KODE_PRODI = Object.entries(KODE_PRODI)
+    .map(([nama, kode]) => [nama.toLowerCase().replace(/\s+/g, ' ').trim(), kode])
+    .sort((a, b) => b[0].length - a[0].length);
+
   // Penanda kelas Praktikum: awalan yang ditambahkan di depan nama mata kuliah.
   const AWALAN_PRAKTIKUM = '(P) ';
 
@@ -127,7 +136,9 @@
   // https://siado.ub.ac.id/dosen-obe/akademik/jadwal
   // Di halaman ini skrip HANYA merapikan tabel jadwal: menyembunyikan kolom
   // yang tidak diperlukan, meng-align center beberapa kolom, mengganti judul
-  // "KLS" -> "KELAS", mengklik "Tampilkan", menampilkan semua baris ("All"),
+  // kolom, mengisi kolom KELAS dengan kode prodi (mis. "TIF (D)"), memberi
+  // efek hover, memadatkan tombol "Lihat", memungkinkan klik baris untuk
+  // memilih radio, mengklik "Tampilkan", menampilkan semua baris ("All"),
   // dan mengunci lebar kolom supaya tabel tidak melebar ke samping.
   // Tidak ada tombol "Ajar Sekarang", autofill presensi, pemindahan kolom,
   // maupun pewarnaan baris seperti di halaman /dosen/akademik/jadwal.
@@ -143,7 +154,26 @@
   ];
 
   // Ganti judul kolom: { 'judul asli dari SIADO': 'judul baru' }.
-  const KOLOM_RENAME_OBE = { 'KLS': 'KELAS' };
+  const KOLOM_RENAME_OBE = {
+    'KLS': 'KELAS',
+    'Jumlah Peserta': 'JUMLAH MAHASISWA',
+  };
+
+  // Isi kolom KELAS diberi awalan kode program studi, mis. "D" -> "TIF (D)".
+  // Kode diambil dari KODE_PRODI di blok KONFIGURASI, dicocokkan dengan teks
+  // kolom "Program Studi" pada baris yang sama.
+  const KELAS_PAKAI_KODE_PRODI_OBE = true;
+
+  const HOVER_WARNA_OBE = '#bbdefb';          // warna latar baris saat disorot mouse
+  const KLIK_BARIS_PILIH_RADIO_OBE = true;    // klik di mana saja pada baris = pilih radio button baris itu
+  const TOMBOL_LIHAT_PADAT_OBE = true;        // tombol/link di dalam sel (mis. "Lihat") dipadatkan secara vertikal
+
+  // Sembunyikan bar biru DataTables di bawah tabel ("Showing 1 to 15 of 15 entries"
+  // beserta navigasi halamannya) dan bar biru di atas tabel (kotak "Search" +
+  // "Show xx entries"). Keduanya hanya di-display:none, jadi AUTO_SHOW_ALL_ENTRIES_OBE
+  // tetap bisa mengubah pilihan "Show entries" menjadi "All".
+  const SEMBUNYIKAN_INFO_ENTRIES_OBE = true;
+  const SEMBUNYIKAN_BAR_SEARCH_OBE = true;
 
   const AUTO_KLIK_TAMPILKAN_OBE = true;   // otomatis klik "Tampilkan" saat halaman dimuat
   const AUTO_SHOW_ALL_ENTRIES_OBE = true; // otomatis ubah "Show entries" menjadi "All"
@@ -159,7 +189,7 @@
     'Pilih': '46px',
     'Nama': '190px',
     'SKS': '40px',
-    'Jumlah Peserta': '70px',
+    'Jumlah Peserta': '82px',
     'Kehadiran Dosen': '72px',
     'KLS': '56px',
     'Ruang Kuliah': '78px',
@@ -175,24 +205,46 @@
 
   // Menyembunyikan kolom pada #tabelku berdasarkan teks header (tanpa spasi, tanpa
   // memandang besar-kecil huruf), meng-align center kolom tertentu, mengganti judul
-  // kolom, dan mengunci lebar kolom. Header berkelompok (mis. "DETIL KELAS") ikut
-  // dikurangi colspan-nya, atau disembunyikan bila seluruh anaknya hilang.
+  // kolom, mengisi kolom KELAS dengan kode prodi, dan mengunci lebar kolom. Header
+  // berkelompok (mis. "DETIL KELAS") ikut dikurangi colspan-nya, atau disembunyikan
+  // bila seluruh anaknya hilang.
   // Idempotent: hasil perhitungan di-cache pada elemen tabel & tiap baris, jadi aman
   // dipanggil berulang kali oleh MutationObserver (search, sort, ganti halaman, dsb.).
   function sembunyikanKolomOBE() {
     const table = document.getElementById('tabelku');
     if (!table || !table.tHead || !table.tBodies[0]) return;
 
-    let hiddenCols, centerCols;
+    let hiddenCols, centerCols, klsIdx, prodiIdx;
     if (table.dataset.obeSetup === '1') {
       hiddenCols = JSON.parse(table.dataset.obeHiddenCols || '[]');
       centerCols = JSON.parse(table.dataset.obeCenterCols || '[]');
+      klsIdx = Number(table.dataset.obeKlsIdx);
+      prodiIdx = Number(table.dataset.obeProdiIdx);
     } else {
       if (!document.getElementById('siado-helper-obe-style')) {
         const st = document.createElement('style');
         st.id = 'siado-helper-obe-style';
         st.textContent =
           '#tabelku th.siado-obe-center, #tabelku td.siado-obe-center { text-align: center !important; }' +
+          /* Efek hover: baris yang disorot mouse diberi latar biru muda. */
+          `#tabelku tbody tr:hover td { background-color: ${HOVER_WARNA_OBE} !important; }` +
+          (KLIK_BARIS_PILIH_RADIO_OBE ? '#tabelku tbody tr { cursor: pointer; }' : '') +
+          (TOMBOL_LIHAT_PADAT_OBE ? `
+            /* Tombol/link di dalam sel (mis. "Lihat" pada kolom Link BRONE) dipadatkan
+               secara vertikal: padding atas-bawah dinolkan, tinggi mengikuti isinya. */
+            #tabelku tbody td .btn,
+            #tabelku tbody td button,
+            #tabelku tbody td a.btn,
+            #tabelku tbody td input[type="button"],
+            #tabelku tbody td input[type="submit"] {
+              padding-top: 0 !important;
+              padding-bottom: 0 !important;
+              line-height: 1.35 !important;
+              min-height: 0 !important;
+              height: auto !important;
+              vertical-align: middle !important;
+            }
+          ` : '') +
           (TAMPILAN_KOMPAK_OBE ? `
             /* DataTables mengunci lebar <table> lewat inline style; width:100% !important
                mengalahkan itu supaya lebar tabel mengikuti wadahnya & tidak overflow. */
@@ -232,6 +284,10 @@
         centerCols.push(i);
         grid[leafRow][i].classList.add('siado-obe-center');
       });
+
+      // Dicari SEBELUM rename supaya judul asli ('KLS') masih cocok.
+      klsIdx = cariIdx('KLS');
+      prodiIdx = cariIdx('Program Studi');
 
       const hideTargets = KOLOM_DISEMBUNYIKAN_OBE.map(normalizeHeaderText);
       const set = new Set();
@@ -275,6 +331,8 @@
       hiddenCols = Array.from(set);
       table.dataset.obeHiddenCols = JSON.stringify(hiddenCols);
       table.dataset.obeCenterCols = JSON.stringify(centerCols);
+      table.dataset.obeKlsIdx = klsIdx;
+      table.dataset.obeProdiIdx = prodiIdx;
       table.dataset.obeSetup = '1';
     }
 
@@ -291,8 +349,16 @@
         col += span;
       });
       centerCols.forEach(i => { if (row.cells[i]) row.cells[i].classList.add('siado-obe-center'); });
+      // Isi sel KELAS dengan "KODEPRODI (kelas)", mis. "D" -> "TIF (D)".
+      if (KELAS_PAKAI_KODE_PRODI_OBE && klsIdx !== -1 && row.cells.length > klsIdx) {
+        setLabelKelas(row.cells[klsIdx], (prodiIdx !== -1) ? row.cells[prodiIdx] : null);
+      }
       row.dataset.obeRowDone = '1';
     });
+
+    // Sembunyikan bar biru "Showing x to y of z entries" (bawah) & bar "Search" (atas).
+    if (SEMBUNYIKAN_INFO_ENTRIES_OBE) sembunyikanBarDataTables('tabelku_info');
+    if (SEMBUNYIKAN_BAR_SEARCH_OBE) sembunyikanBarDataTables('tabelku_filter');
 
     if (TAMPILAN_KOMPAK_OBE) fixKontenOverflow();
   }
@@ -333,6 +399,7 @@
       clearTimeout(obeResizeDebounce);
       obeResizeDebounce = setTimeout(fixKontenOverflow, 150);
     });
+    if (KLIK_BARIS_PILIH_RADIO_OBE) pasangKlikBarisPilihRadio();
     autoInitOBE();
     return; // hentikan di sini: fitur di bawah khusus halaman /dosen/akademik/jadwal
   }
@@ -734,12 +801,6 @@
   const KOLOM_CENTER_KEYS = ['noIdx', 'pilihIdx', 'klsIdx', 'sksIdx', 'ruangIdx', 'hariIdx', 'jamMulaiIdx', 'jamSelesaiIdx', 'tipeIdx'];
   const HIDE_TARGETS = KOLOM_DISEMBUNYIKAN.map(normalizeHeaderText);
 
-  // Daftar [nama prodi (huruf kecil), kode] diurutkan dari nama terpanjang, supaya
-  // "pendidikan teknologi informasi" dicek sebelum "teknologi informasi".
-  const DAFTAR_KODE_PRODI = Object.entries(KODE_PRODI)
-    .map(([nama, kode]) => [nama.toLowerCase().replace(/\s+/g, ' ').trim(), kode])
-    .sort((a, b) => b[0].length - a[0].length);
-
   function cariKodeProdi(teksProdi) {
     const t = (teksProdi || '').toLowerCase().replace(/\s+/g, ' ').trim();
     if (!t) return null;
@@ -891,6 +952,20 @@
       #tabelku tbody tr:not(.hari-today):not(.sedang-berlangsung) td { background-color: #ffffff !important; }
       #tabelku tbody tr:not(.hari-today):not(.sedang-berlangsung):hover td { background-color: #bbdefb !important; }
       #tabelku tbody tr:hover td { background-color: #bbdefb !important; }
+      #tabelku tbody tr { cursor: pointer; }
+      /* Tombol/link di dalam sel dipadatkan secara vertikal. */
+      #tabelku tbody td .btn,
+      #tabelku tbody td button,
+      #tabelku tbody td a.btn,
+      #tabelku tbody td input[type="button"],
+      #tabelku tbody td input[type="submit"] {
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+        line-height: 1.35 !important;
+        min-height: 0 !important;
+        height: auto !important;
+        vertical-align: middle !important;
+      }
       ${TAMPILAN_KOMPAK ? `
       /* DataTables mengunci lebar <table> lewat inline style; width:100% !important
          mengalahkan itu supaya lebar tabel mengikuti wadahnya yang sebenarnya. */
@@ -946,24 +1021,31 @@
   }
 
   // ---- Event delegation global: Klik baris untuk memilih radio button ----
-  document.body.addEventListener('click', (e) => {
-    // Pastikan elemen yang diklik berada di dalam baris <tr> pada tbody tabelku
-    const row = e.target.closest('#tabelku tbody tr');
-    if (!row) return;
+  // Dipakai di kedua halaman (jadwal biasa & OBE). Dibungkus fungsi (function
+  // declaration -> ter-hoisting) supaya blok OBE di atas bisa memanggilnya.
+  function pasangKlikBarisPilihRadio() {
+    if (document.body.dataset.siadoKlikBarisTerpasang === '1') return;
+    document.body.dataset.siadoKlikBarisTerpasang = '1';
+    document.body.addEventListener('click', (e) => {
+      // Pastikan elemen yang diklik berada di dalam baris <tr> pada tbody tabelku
+      const row = e.target.closest('#tabelku tbody tr');
+      if (!row) return;
 
-    // Jika yang diklik adalah radio button itu sendiri, checkbox, link, atau tombol,
-    // biarkan aksi bawaannya berjalan alami
-    if (e.target.closest('input, button, a, select, textarea, label')) return;
+      // Jika yang diklik adalah radio button itu sendiri, checkbox, link, atau tombol,
+      // biarkan aksi bawaannya berjalan alami
+      if (e.target.closest('input, button, a, select, textarea, label')) return;
 
-    // Cari radio button di baris tersebut
-    const radio = row.querySelector('input[type="radio"]');
-    if (radio && !radio.disabled) {
-      // Pemicu manual: beri centang lalu trigger event 'change' & 'click'
-      radio.checked = true;
-      radio.dispatchEvent(new Event('change', { bubbles: true }));
-      radio.click();
-    }
-  });
+      // Cari radio button di baris tersebut
+      const radio = row.querySelector('input[type="radio"]');
+      if (radio && !radio.disabled) {
+        // Pemicu manual: beri centang lalu trigger event 'change' & 'click'
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change', { bubbles: true }));
+        radio.click();
+      }
+    });
+  }
+  pasangKlikBarisPilihRadio();
 
   // Sembunyikan kolom pada header hanya sekali per elemen tabel (tabel dibuat ulang dari
   // nol setiap kali tombol "Tampilkan" diklik, sehingga flag ini otomatis ter-reset saat itu).
