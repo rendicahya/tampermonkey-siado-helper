@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SIADO - Auto Presensi Helper
 // @namespace    siado-presensi-helper
-// @version      1.34
+// @version      1.36
 // @description  Semi-otomatisasi alur input Sub Capaian Pembelajaran & Presensi Mahasiswa di SIADO UB: deteksi kelas Tatap Muka yang sedang berlangsung, buka form presensi, lalu isi otomatis "Batas Presensi Mahasiswa" (jam mulai + 30 menit) dan "Keterangan" (Luring). Dosen tinggal mengisi Sub Capaian Pembelajaran lalu klik Simpan.
 // @match        https://siado.ub.ac.id/dosen/akademik/jadwal*
 // @match        https://siado.ub.ac.id//dosen/akademik/jadwal*
@@ -56,6 +56,13 @@
   // bar yang sama). Pilihan "Show entries" tetap ada di halaman (hanya tidak tampak), jadi
   // AUTO_SHOW_ALL_ENTRIES tetap bisa mengubahnya ke "All".
   const SEMBUNYIKAN_BAR_SEARCH = true;
+
+  // Sembunyikan footer halaman (<div id="footer">).
+  const SEMBUNYIKAN_FOOTER = true;
+
+  // Sembunyikan <div class="search"> yang berada DI BAWAH tabel jadwal. Div "search" di atas
+  // tabel (mis. form filter berisi tombol "Tampilkan") tidak disentuh.
+  const SEMBUNYIKAN_DIV_SEARCH_BAWAH = true;
   // Kode singkatan program studi. Dicocokkan dengan teks pada kolom "Program Studi"
   // (tanpa memandang huruf besar/kecil; nama yang lebih panjang dicek lebih dulu supaya
   // "Pendidikan Teknologi Informasi" tidak tertangkap sebagai "Teknologi Informasi").
@@ -469,6 +476,15 @@
   // ====== sembunyikan kolom yang tidak diperlukan.                  ======
   // =====================================================================
   const DAY_NAMES = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+
+  // Footer disembunyikan lewat CSS (bukan JS per elemen) supaya langsung berlaku sejak
+  // halaman dimuat, termasuk bila footer baru dibuat belakangan.
+  if (SEMBUNYIKAN_FOOTER && !document.getElementById('siado-helper-footer-style')) {
+    const footerStyle = document.createElement('style');
+    footerStyle.id = 'siado-helper-footer-style';
+    footerStyle.textContent = '#footer { display: none !important; }';
+    document.head.appendChild(footerStyle);
+  }
 
   function normalizeHeaderText(s) {
     return (s || '').replace(/\s+/g, '').toUpperCase();
@@ -910,6 +926,17 @@
   function sembunyikanInfoEntries() {
     if (SEMBUNYIKAN_INFO_ENTRIES) sembunyikanBarDataTables('tabelku_info');
     if (SEMBUNYIKAN_BAR_SEARCH) sembunyikanBarDataTables('tabelku_filter');
+    if (SEMBUNYIKAN_DIV_SEARCH_BAWAH) sembunyikanDivSearchBawah();
+  }
+  function sembunyikanDivSearchBawah() {
+    const table = document.getElementById('tabelku');
+    if (!table) return;
+    document.querySelectorAll('div.search').forEach(div => {
+      if (div.style.display === 'none') return;
+      if (div.contains(table)) return;
+      if (!(table.compareDocumentPosition(div) & Node.DOCUMENT_POSITION_FOLLOWING)) return;
+      div.style.setProperty('display', 'none', 'important');
+    });
   }
   function sembunyikanBarDataTables(elementId) {
     const info = document.getElementById(elementId);
