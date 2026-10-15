@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SIADO - Auto Presensi Helper
 // @namespace    siado-presensi-helper
-// @version      1.26
+// @version      1.27
 // @description  Semi-otomatisasi alur input Sub Capaian Pembelajaran & Presensi Mahasiswa di SIADO UB: deteksi kelas Tatap Muka yang sedang berlangsung, buka form presensi, lalu isi otomatis "Batas Presensi Mahasiswa" (jam mulai + 30 menit) dan "Keterangan" (Luring). Dosen tinggal mengisi Sub Capaian Pembelajaran lalu klik Simpan.
 // @match        https://siado.ub.ac.id/dosen/akademik/jadwal*
 // @match        https://siado.ub.ac.id//dosen/akademik/jadwal*
@@ -564,6 +564,9 @@
          abu-abu di atas karena tingkat spesifisitasnya sama (yang di bawah yang menang). */
       #tabelku tbody tr.hari-today td { background-color: #fff9c4 !important; }
       #tabelku tbody tr.sedang-berlangsung td { font-weight: bold !important; background-color: #fff176 !important; }
+      #tabelku tbody tr:not(.hari-today):not(.sedang-berlangsung) td { background-color: #ffffff !important; }
+      #tabelku tbody tr:not(.hari-today):not(.sedang-berlangsung):hover td { background-color: #bbdefb !important; }
+      #tabelku tbody tr:hover td { background-color: #bbdefb !important; }
       ${TAMPILAN_KOMPAK ? `
       /* DataTables mengunci lebar <table> lewat inline style; width:100% !important
          mengalahkan itu supaya lebar tabel mengikuti wadahnya yang sebenarnya. */
@@ -617,6 +620,26 @@
     `;
     document.head.appendChild(style);
   }
+
+  // ---- Event delegation global: Klik baris untuk memilih radio button ----
+  document.body.addEventListener('click', (e) => {
+    // Pastikan elemen yang diklik berada di dalam baris <tr> pada tbody tabelku
+    const row = e.target.closest('#tabelku tbody tr');
+    if (!row) return;
+
+    // Jika yang diklik adalah radio button itu sendiri, checkbox, link, atau tombol,
+    // biarkan aksi bawaannya berjalan alami
+    if (e.target.closest('input, button, a, select, textarea, label')) return;
+
+    // Cari radio button di baris tersebut
+    const radio = row.querySelector('input[type="radio"]');
+    if (radio && !radio.disabled) {
+      // Pemicu manual: beri centang lalu trigger event 'change' & 'click'
+      radio.checked = true;
+      radio.dispatchEvent(new Event('change', { bubbles: true }));
+      radio.click();
+    }
+  });
 
   // Sembunyikan kolom pada header hanya sekali per elemen tabel (tabel dibuat ulang dari
   // nol setiap kali tombol "Tampilkan" diklik, sehingga flag ini otomatis ter-reset saat itu).
