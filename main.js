@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         SIADO - Auto Presensi Helper
 // @namespace    siado-presensi-helper
-// @version      1.36
-// @description  Semi-otomatisasi alur input Sub Capaian Pembelajaran & Presensi Mahasiswa di SIADO UB: deteksi kelas Tatap Muka yang sedang berlangsung, buka form presensi, lalu isi otomatis "Batas Presensi Mahasiswa" (jam mulai + 30 menit) dan "Keterangan" (Luring). Dosen tinggal mengisi Sub Capaian Pembelajaran lalu klik Simpan.
+// @version      1.43
+// @description  Semi-otomatisasi alur input Sub Capaian Pembelajaran & Presensi Mahasiswa di SIADO UB: deteksi kelas Tatap Muka yang sedang berlangsung, buka form presensi, lalu isi otomatis "Batas Presensi Mahasiswa" (jam mulai + 30 menit) dan "Keterangan" (Luring). Dosen tinggal mengisi Sub Capaian Pembelajaran lalu klik Simpan. Di halaman OBE (/dosen-obe/akademik/jadwal) hanya merapikan tampilan tabel jadwal.
 // @match        https://siado.ub.ac.id/dosen/akademik/jadwal*
 // @match        https://siado.ub.ac.id//dosen/akademik/jadwal*
+// @match        https://siado.ub.ac.id/dosen-obe/akademik/jadwal*
+// @match        https://siado.ub.ac.id//dosen-obe/akademik/jadwal*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
@@ -38,11 +40,6 @@
     'KLS': 'KELAS',
     'Jumlah Peserta': 'JUMLAH MAHASISWA',
   };
-
-  // Sembunyikan tombol-tombol yang berada di bawah tabel jadwal (dalam panel yang sama).
-  // Tombol hanya disembunyikan (display:none), tidak dihapus, sehingga fungsi "Ajar Sekarang"
-  // yang memanggilnya di balik layar tetap berjalan. Ubah ke false untuk menampilkannya lagi.
-  const SEMBUNYIKAN_TOMBOL_BAWAH_TABEL = true;
 
   // Toolbar paling atas (yang ada logo SIADO) tidak lagi menempel (sticky/fixed) saat halaman
   // digulir, tetapi ikut tergulung ke atas. Ubah ke false untuk mengembalikan perilaku aslinya.
@@ -93,6 +90,15 @@
   const TUNGGU_DROPDOWN_STABIL_MS = 300;  // jeda antar pengecekan saat menunggu nilai dropdown berhenti berubah
   const TUNGGU_DROPDOWN_STABIL_ULANGAN = 6; // maksimum berapa kali pengecekan (300ms x 6 = ~1.8 detik)
 
+  // Setelah "Show entries" diubah ke "All", DataTables perlu merender ulang SELURUH baris
+  // (termasuk baris yang sebelumnya cuma ada di halaman ke-2, dst.). setShowAllEntries()
+  // menunggu sampai JUMLAH baris di tbody benar-benar berhenti berubah sebelum resolve.
+  // (Letaknya sengaja di blok KONFIGURASI supaya sudah terinisialisasi saat mode OBE
+  // di bawah memanggil setShowAllEntries() lalu mengakhiri skrip dengan `return`.)
+  const TUNGGU_SHOW_ALL_STABIL_MS = 200;     // jeda antar pengecekan jumlah baris
+  const TUNGGU_SHOW_ALL_STABIL_ULANGAN = 3;  // berapa kali berturut-turut jumlah baris harus sama sebelum dianggap stabil
+  const TUNGGU_SHOW_ALL_TIMEOUT_MS = 6000;   // batas maksimum menunggu (jaga-jaga kalau tidak pernah stabil)
+
   // Tampilan tabel jadwal supaya tidak terlalu lebar ke samping.
   const TAMPILAN_KOMPAK = true;      // perkecil font & padding tabel
   const TAMPILAN_FONT_SIZE = '12px';
@@ -115,6 +121,223 @@
   const TAMPILAN_LEBAR_MAKS_TIPE = '85px';        // lebar kolom "Tipe Pertemuan"
   const TAMPILAN_LEBAR_DEFAULT = '70px';          // jaring pengaman untuk kolom lain yang mungkin belum terdaftar di atas
   // ===========================================================
+
+  // =======================================================================
+  // ======================= HALAMAN SIADO OBE =============================
+  // https://siado.ub.ac.id/dosen-obe/akademik/jadwal
+  // Di halaman ini skrip HANYA merapikan tabel jadwal: menyembunyikan kolom
+  // yang tidak diperlukan, meng-align center beberapa kolom, mengganti judul
+  // "KLS" -> "KELAS", mengklik "Tampilkan", menampilkan semua baris ("All"),
+  // dan mengunci lebar kolom supaya tabel tidak melebar ke samping.
+  // Tidak ada tombol "Ajar Sekarang", autofill presensi, pemindahan kolom,
+  // maupun pewarnaan baris seperti di halaman /dosen/akademik/jadwal.
+  // =======================================================================
+  const KOLOM_DISEMBUNYIKAN_OBE = [
+    'Kode MK', 'Tahun', 'Tim Pengajar', 'Gedung Kuliah', 'SKS Kelas',
+    'Tipe Pertemuan', 'Fakultas', 'Jurusan', 'Seleksi', 'Ketua', 'Link GMeet',
+  ];
+
+  // Kolom yang isinya di-align center (pakai judul ASLI dari SIADO, mis. 'KLS').
+  const KOLOM_CENTER_OBE = [
+    'No', 'Pilih', 'SKS', 'KLS', 'Ruang Kuliah', 'Jam Mulai', 'Jam Selesai', 'Link BRONE',
+  ];
+
+  // Ganti judul kolom: { 'judul asli dari SIADO': 'judul baru' }.
+  const KOLOM_RENAME_OBE = { 'KLS': 'KELAS' };
+
+  const AUTO_KLIK_TAMPILKAN_OBE = true;   // otomatis klik "Tampilkan" saat halaman dimuat
+  const AUTO_SHOW_ALL_ENTRIES_OBE = true; // otomatis ubah "Show entries" menjadi "All"
+  const TAMPILAN_KOMPAK_OBE = true;       // perkecil font/padding + kunci lebar kolom agar tabel tidak overflow ke samping
+  const TAMPILAN_FONT_SIZE_OBE = '12px';
+  const TAMPILAN_PADDING_OBE = '3px 5px';
+
+  // Lebar tiap kolom yang tampak (judul ASLI dari SIADO). Sebaiknya SEMUA kolom yang
+  // tampak terdaftar di sini; yang tidak terdaftar memakai TAMPILAN_LEBAR_DEFAULT_OBE.
+  // Sisa lebar tabel dibagi proporsional, jadi angka-angka ini aman diutak-atik.
+  const TAMPILAN_LEBAR_OBE = {
+    'No': '32px',
+    'Pilih': '46px',
+    'Nama': '190px',
+    'SKS': '40px',
+    'Jumlah Peserta': '70px',
+    'Kehadiran Dosen': '72px',
+    'KLS': '56px',
+    'Ruang Kuliah': '78px',
+    'Hari': '60px',
+    'Jam Mulai': '58px',
+    'Jam Selesai': '58px',
+    'Program Studi': '150px',
+    'Link BRONE': '66px',
+  };
+  const TAMPILAN_LEBAR_DEFAULT_OBE = '70px';
+
+  const IS_HALAMAN_OBE = /\/dosen-obe\/akademik\/jadwal/i.test(location.pathname);
+
+  // Menyembunyikan kolom pada #tabelku berdasarkan teks header (tanpa spasi, tanpa
+  // memandang besar-kecil huruf), meng-align center kolom tertentu, mengganti judul
+  // kolom, dan mengunci lebar kolom. Header berkelompok (mis. "DETIL KELAS") ikut
+  // dikurangi colspan-nya, atau disembunyikan bila seluruh anaknya hilang.
+  // Idempotent: hasil perhitungan di-cache pada elemen tabel & tiap baris, jadi aman
+  // dipanggil berulang kali oleh MutationObserver (search, sort, ganti halaman, dsb.).
+  function sembunyikanKolomOBE() {
+    const table = document.getElementById('tabelku');
+    if (!table || !table.tHead || !table.tBodies[0]) return;
+
+    let hiddenCols, centerCols;
+    if (table.dataset.obeSetup === '1') {
+      hiddenCols = JSON.parse(table.dataset.obeHiddenCols || '[]');
+      centerCols = JSON.parse(table.dataset.obeCenterCols || '[]');
+    } else {
+      if (!document.getElementById('siado-helper-obe-style')) {
+        const st = document.createElement('style');
+        st.id = 'siado-helper-obe-style';
+        st.textContent =
+          '#tabelku th.siado-obe-center, #tabelku td.siado-obe-center { text-align: center !important; }' +
+          (TAMPILAN_KOMPAK_OBE ? `
+            /* DataTables mengunci lebar <table> lewat inline style; width:100% !important
+               mengalahkan itu supaya lebar tabel mengikuti wadahnya & tidak overflow. */
+            #tabelku {
+              table-layout: fixed !important;
+              width: 100% !important;
+              box-sizing: border-box !important;
+            }
+            #tabelku, #tabelku th, #tabelku td { font-size: ${TAMPILAN_FONT_SIZE_OBE} !important; }
+            #tabelku th, #tabelku td {
+              padding: ${TAMPILAN_PADDING_OBE} !important;
+              white-space: normal !important;
+              word-break: break-word !important;
+              box-sizing: border-box !important;
+            }
+          ` : '');
+        document.head.appendChild(st);
+      }
+
+      const { grid, totalCols, numRows, cellStart } = buildHeaderGrid(table.tHead);
+      const leafRow = numRows - 1;
+      const cariIdx = (judul) => {
+        const n = normalizeHeaderText(judul);
+        for (let c = 0; c < totalCols; c++) {
+          const cell = grid[leafRow][c];
+          if (cell && normalizeHeaderText(cell.textContent) === n) return c;
+        }
+        return -1;
+      };
+
+      // Index kolom WAJIB dicari SEBELUM kolom disembunyikan & sebelum rename:
+      // penyembunyian mengubah colspan header grup sehingga pemetaan kolom bergeser.
+      centerCols = [];
+      KOLOM_CENTER_OBE.forEach(judul => {
+        const i = cariIdx(judul);
+        if (i === -1) return;
+        centerCols.push(i);
+        grid[leafRow][i].classList.add('siado-obe-center');
+      });
+
+      const hideTargets = KOLOM_DISEMBUNYIKAN_OBE.map(normalizeHeaderText);
+      const set = new Set();
+      for (let c = 0; c < totalCols; c++) {
+        const cell = grid[leafRow][c];
+        if (cell && hideTargets.includes(normalizeHeaderText(cell.textContent))) set.add(c);
+      }
+
+      // Kunci lebar kolom lewat <colgroup> + table-layout:fixed.
+      if (TAMPILAN_KOMPAK_OBE) {
+        const widthByIdx = {};
+        Object.entries(TAMPILAN_LEBAR_OBE).forEach(([judul, lebar]) => {
+          const i = cariIdx(judul);
+          if (i !== -1) widthByIdx[i] = lebar;
+        });
+        table.querySelectorAll(':scope > colgroup').forEach(cg => cg.remove());
+        const colgroup = document.createElement('colgroup');
+        for (let i = 0; i < totalCols; i++) {
+          const col = document.createElement('col');
+          if (set.has(i)) col.style.display = 'none';
+          else col.style.width = widthByIdx[i] || TAMPILAN_LEBAR_DEFAULT_OBE;
+          colgroup.appendChild(col);
+        }
+        table.insertBefore(colgroup, table.firstChild);
+      }
+
+      // Rename dilakukan setelah semua index dicari (supaya judul asli masih cocok).
+      Object.entries(KOLOM_RENAME_OBE).forEach(([judulAsli, judulBaru]) => {
+        const i = cariIdx(judulAsli);
+        if (i !== -1) grid[leafRow][i].textContent = judulBaru;
+      });
+
+      cellStart.forEach(({ col, colSpan }, cell) => {
+        let hiddenCount = 0;
+        for (let k = 0; k < colSpan; k++) if (set.has(col + k)) hiddenCount++;
+        if (hiddenCount === 0) return;
+        if (hiddenCount === colSpan) cell.style.display = 'none';
+        else cell.colSpan = colSpan - hiddenCount;
+      });
+
+      hiddenCols = Array.from(set);
+      table.dataset.obeHiddenCols = JSON.stringify(hiddenCols);
+      table.dataset.obeCenterCols = JSON.stringify(centerCols);
+      table.dataset.obeSetup = '1';
+    }
+
+    const hidden = new Set(hiddenCols);
+    Array.from(table.tBodies[0].rows).forEach(row => {
+      if (row.dataset.obeRowDone === '1') return;
+      if (row.cells.length <= 1) return; // baris placeholder "No data available"
+      let col = 0;
+      Array.from(row.cells).forEach(td => {
+        const span = td.colSpan || 1;
+        let anyHidden = false;
+        for (let k = 0; k < span; k++) if (hidden.has(col + k)) anyHidden = true;
+        if (anyHidden) td.style.display = 'none';
+        col += span;
+      });
+      centerCols.forEach(i => { if (row.cells[i]) row.cells[i].classList.add('siado-obe-center'); });
+      row.dataset.obeRowDone = '1';
+    });
+
+    if (TAMPILAN_KOMPAK_OBE) fixKontenOverflow();
+  }
+
+  // Klik "Tampilkan" otomatis, lalu tampilkan semua baris ("All"), lalu format ulang
+  // tabel (baris dari halaman 2+ baru muncul di DOM setelah "All" diterapkan).
+  async function autoInitOBE() {
+    try {
+      if (!AUTO_KLIK_TAMPILKAN_OBE) return;
+      const tampilkanBtn = await waitFor(() => {
+        const btn = Array.from(document.querySelectorAll('button'))
+          .find(b => b.textContent.trim() === 'Tampilkan');
+        return (btn && isVisible(btn)) ? btn : null;
+      }, 10000).catch(() => null);
+      if (!tampilkanBtn) return;
+      await tungguDropdownSiap();
+      tampilkanBtn.click();
+      await waitFor(() => {
+        const t = document.getElementById('tabelku');
+        return t && t.tBodies[0] && t.tBodies[0].rows.length > 0 && t.tBodies[0].rows[0].cells.length > 1;
+      }, 10000).catch(() => {});
+      if (AUTO_SHOW_ALL_ENTRIES_OBE) await setShowAllEntries();
+      sembunyikanKolomOBE();
+    } catch (e) {
+      console.error('[SIADO Helper] auto-init OBE gagal:', e);
+    }
+  }
+
+  if (IS_HALAMAN_OBE) {
+    sembunyikanKolomOBE();
+    let obeDebounce = null;
+    new MutationObserver(() => {
+      clearTimeout(obeDebounce);
+      obeDebounce = setTimeout(sembunyikanKolomOBE, 150);
+    }).observe(document.body, { childList: true, subtree: true });
+    let obeResizeDebounce = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(obeResizeDebounce);
+      obeResizeDebounce = setTimeout(fixKontenOverflow, 150);
+    });
+    autoInitOBE();
+    return; // hentikan di sini: fitur di bawah khusus halaman /dosen/akademik/jadwal
+  }
+  // =======================================================================
+
   function pad(n) { return String(n).padStart(2, '0'); }
   function toast(msg, isError) {
     let el = document.getElementById('siado-helper-toast');
@@ -122,12 +345,31 @@
       el = document.createElement('div');
       el.id = 'siado-helper-toast';
       el.style.cssText = 'position:fixed;bottom:80px;right:20px;max-width:340px;z-index:99999;' +
-        'padding:12px 16px;border-radius:8px;font:14px/1.4 sans-serif;' +
+        'padding:12px 36px 12px 16px;border-radius:8px;font:14px/1.4 sans-serif;' +
         'box-shadow:0 4px 14px rgba(0,0,0,.3);color:#fff;white-space:pre-line;';
+      const msgEl = document.createElement('div');
+      msgEl.id = 'siado-helper-toast-msg';
+      // Tombol X untuk menutup toast secara manual.
+      const closeBtn = document.createElement('button');
+      closeBtn.id = 'siado-helper-toast-close';
+      closeBtn.type = 'button';
+      closeBtn.textContent = '×';
+      closeBtn.title = 'Tutup';
+      closeBtn.setAttribute('aria-label', 'Tutup');
+      closeBtn.style.cssText = 'position:absolute;top:4px;right:6px;background:none;border:none;' +
+        'color:#fff;font:bold 20px/1 sans-serif;cursor:pointer;padding:4px 6px;opacity:.8;';
+      closeBtn.addEventListener('mouseenter', () => { closeBtn.style.opacity = '1'; });
+      closeBtn.addEventListener('mouseleave', () => { closeBtn.style.opacity = '.8'; });
+      closeBtn.addEventListener('click', () => {
+        clearTimeout(el._hideTimer);
+        el.style.display = 'none';
+      });
+      el.appendChild(msgEl);
+      el.appendChild(closeBtn);
       document.body.appendChild(el);
     }
     el.style.background = isError ? '#c0392b' : '#2d6a4f';
-    el.textContent = msg;
+    document.getElementById('siado-helper-toast-msg').textContent = msg;
     el.style.display = 'block';
     clearTimeout(el._hideTimer);
     el._hideTimer = setTimeout(() => { el.style.display = 'none'; }, 7000);
@@ -156,9 +398,7 @@
   // (termasuk baris yang sebelumnya cuma ada di halaman ke-2, dst.). Kita tunggu sampai
   // JUMLAH baris di tbody benar-benar berhenti berubah (stabil beberapa kali pengecekan
   // berturut-turut) sebelum resolve -- mirip pola tungguDropdownSiap() di bawah.
-  const TUNGGU_SHOW_ALL_STABIL_MS = 200;     // jeda antar pengecekan jumlah baris
-  const TUNGGU_SHOW_ALL_STABIL_ULANGAN = 3;  // berapa kali berturut-turut jumlah baris harus sama sebelum dianggap stabil
-  const TUNGGU_SHOW_ALL_TIMEOUT_MS = 6000;   // batas maksimum menunggu (jaga-jaga kalau tidak pernah stabil)
+  // (Konstanta TUNGGU_SHOW_ALL_* ada di blok KONFIGURASI paling atas.)
   function setShowAllEntries() {
     return new Promise((resolve) => {
       const sel = document.querySelector('select[name="tabelku_length"]');
@@ -873,27 +1113,6 @@
     }
   }
 
-  // Sembunyikan tombol yang letaknya SETELAH tabel jadwal (urutan dokumen) di dalam panel
-  // pembungkus tabel yang sama. Tombol di dalam modal/dialog, kontrol DataTables (pagination),
-  // dan tombol milik skrip ini tidak ikut disembunyikan.
-  function sembunyikanTombolBawahTabel() {
-    if (!SEMBUNYIKAN_TOMBOL_BAWAH_TABEL) return;
-    const table = document.getElementById('tabelku');
-    if (!table) return;
-    const wrapper = document.getElementById('tabelku_wrapper') || table;
-    const panel = wrapper.closest('.panel, .card, .box, .x_panel, .widget-box') ||
-      (wrapper.parentElement && wrapper.parentElement.parentElement) || document.body;
-    panel.querySelectorAll('button, a.btn, input[type="button"], input[type="submit"]').forEach(btn => {
-      if (btn.style.display === 'none') return;
-      if (wrapper.contains(btn)) return;
-      if (btn.closest('.modal, [role="dialog"]')) return;
-      if (btn.id && btn.id.startsWith('siado-helper')) return;
-      if (!(wrapper.compareDocumentPosition(btn) & Node.DOCUMENT_POSITION_FOLLOWING)) return;
-      btn.style.display = 'none';
-      btn.dataset.siadoDisembunyikan = '1';
-    });
-  }
-
   // Cari toolbar atas yang "menempel" (position fixed/sticky, berada di paling atas, selebar
   // minimal separuh layar) lalu lepaskan. Toolbar fixed diubah ke absolute supaya tetap
   // menempati posisi yang sama di puncak halaman (jarak/padding konten tidak berubah) tetapi
@@ -932,9 +1151,15 @@
     const table = document.getElementById('tabelku');
     if (!table) return;
     document.querySelectorAll('div.search').forEach(div => {
-      if (div.style.display === 'none') return;
+      if (div.dataset.siadoSearchDicek === '1') return;
       if (div.contains(table)) return;
       if (!(table.compareDocumentPosition(div) & Node.DOCUMENT_POSITION_FOLLOWING)) return;
+      // Panel SIADO yang masih tersembunyi (baru dimunculkan belakangan) jangan disentuh.
+      if (!isVisible(div)) return;
+      div.dataset.siadoSearchDicek = '1';
+      // Div yang berisi tombol, tabel, atau form adalah panel kerja SIADO
+      // (mis. panel Sub Capaian Pembelajaran / Presensi) -> biarkan tampil.
+      if (div.querySelector('button, a.btn, input, select, textarea, table, form')) return;
       div.style.setProperty('display', 'none', 'important');
     });
   }
@@ -981,7 +1206,6 @@
       fixKontenOverflow();
     }
     const info = setupTableOnceAndGetInfo(table);
-    sembunyikanTombolBawahTabel();
     sembunyikanInfoEntries();
     const { hariIdx, jamMulaiIdx, jamSelesaiIdx, tipeIdx, namaIdx, prodiIdx, ruangIdx, kehadiranIdx, sksIdx, klsIdx, hiddenCols: hiddenColsArr } = info;
     const hiddenCols = new Set(hiddenColsArr);
